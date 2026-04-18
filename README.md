@@ -11,7 +11,7 @@ go install fcuny.net/certcheck@latest
 
 ## Usage
 
-````
+```
 certcheck badssl.com
 
 certcheck go run . -domain badssl.com -port 443 -format long
