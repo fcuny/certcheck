@@ -17,6 +17,8 @@ certcheck badssl.com
 certcheck go run . -domain badssl.com -port 443 -format long
 
 certcheck -domain self-signed.badssl.com -insecure -format long
+
+certcheck -domain badssl.com -timeout 5s
 ```
 
 ## Notes
