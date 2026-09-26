@@ -23,6 +23,7 @@ type Config struct {
 	Insecure bool
 	Format   OutputFormat
 	Timeout  time.Duration
+	WarnDays int
 }
 
 func main() {
@@ -34,6 +35,7 @@ func main() {
 	flag.BoolVar(&config.Insecure, "insecure", false, "Accept invalid certificate")
 	flag.StringVar(&formatStr, "format", "short", "Output format (short|long)")
 	flag.DurationVar(&config.Timeout, "timeout", 10*time.Second, "Connection timeout")
+	flag.IntVar(&config.WarnDays, "warn-days", 0, "Exit with status 2 if certificate expires within this many days (0 disables)")
 	flag.Parse()
 
 	if config.Domain == "" {
@@ -62,6 +64,16 @@ func main() {
 	}
 
 	printCertificate(cert, config.Format)
+
+	remainingDays := int(time.Until(cert.NotAfter).Hours() / 24)
+	os.Exit(exitCodeForExpiry(remainingDays, config.WarnDays))
+}
+
+func exitCodeForExpiry(remainingDays int, warnDays int) int {
+	if warnDays > 0 && remainingDays <= warnDays {
+		return 2
+	}
+	return 0
 }
 
 func getCertificate(domain string, port int, insecure bool, timeout time.Duration) (*x509.Certificate, error) {
