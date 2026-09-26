@@ -21,7 +21,13 @@ certcheck -domain self-signed.badssl.com -insecure -format long
 certcheck -domain badssl.com -timeout 5s
 
 certcheck -domain badssl.com -warn-days 14
+
+certcheck -domain badssl.com -format json
 ```
+
+`-format` accepts `short` (default), `long`, or `json`. The `json` format
+prints a `CertificateInfo` document to stdout, useful for scripting instead
+of parsing the text output.
 
 `-warn-days N` (default `0`, disabled) makes certcheck exit with status `2`
 instead of `0` when the certificate's remaining validity is `N` days or

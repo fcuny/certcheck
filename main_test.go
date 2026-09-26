@@ -1,6 +1,10 @@
 package main
 
 import (
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
+	"net"
 	"testing"
 	"time"
 )
@@ -40,5 +44,61 @@ func TestExitCodeForExpiry(t *testing.T) {
 				t.Errorf("exitCodeForExpiry(%d, %d) = %d, want %d", tt.remainingDays, tt.warnDays, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBuildCertificateInfo(t *testing.T) {
+	notBefore := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	notAfter := notBefore.AddDate(0, 0, 30)
+
+	cert := &x509.Certificate{
+		Version:      3,
+		SerialNumber: big.NewInt(12345),
+		Subject:      pkix.Name{CommonName: "example.com"},
+		Issuer:       pkix.Name{CommonName: "Test CA"},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		DNSNames:     []string{"example.com", "www.example.com"},
+		IPAddresses:  []net.IP{net.ParseIP("192.0.2.1")},
+	}
+
+	info := buildCertificateInfo(cert)
+
+	if info.CommonName != "example.com" {
+		t.Errorf("CommonName = %q, want %q", info.CommonName, "example.com")
+	}
+	if info.SerialNumber != "12345" {
+		t.Errorf("SerialNumber = %q, want %q", info.SerialNumber, "12345")
+	}
+	if info.Version != 3 {
+		t.Errorf("Version = %d, want %d", info.Version, 3)
+	}
+	if info.ValidityDays != 30 {
+		t.Errorf("ValidityDays = %d, want %d", info.ValidityDays, 30)
+	}
+	if !info.Expired {
+		t.Errorf("Expired = %v, want %v", info.Expired, true)
+	}
+	if len(info.DNSNames) != 2 || info.DNSNames[0] != "example.com" || info.DNSNames[1] != "www.example.com" {
+		t.Errorf("DNSNames = %v, want %v", info.DNSNames, []string{"example.com", "www.example.com"})
+	}
+	if len(info.IPAddresses) != 1 || info.IPAddresses[0] != "192.0.2.1" {
+		t.Errorf("IPAddresses = %v, want %v", info.IPAddresses, []string{"192.0.2.1"})
+	}
+}
+
+func TestBuildCertificateInfoNoCommonName(t *testing.T) {
+	cert := &x509.Certificate{
+		NotBefore: time.Now(),
+		NotAfter:  time.Now().Add(24 * time.Hour),
+	}
+
+	info := buildCertificateInfo(cert)
+
+	if info.CommonName != "<no name>" {
+		t.Errorf("CommonName = %q, want %q", info.CommonName, "<no name>")
+	}
+	if info.Expired {
+		t.Errorf("Expired = %v, want %v", info.Expired, false)
 	}
 }
