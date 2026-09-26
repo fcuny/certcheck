@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ type OutputFormat string
 const (
 	FormatShort OutputFormat = "short"
 	FormatLong  OutputFormat = "long"
+	FormatJSON  OutputFormat = "json"
 )
 
 type Config struct {
@@ -33,7 +35,7 @@ func main() {
 	flag.StringVar(&config.Domain, "domain", "", "Domain to check (required)")
 	flag.IntVar(&config.Port, "port", 443, "Port to check")
 	flag.BoolVar(&config.Insecure, "insecure", false, "Accept invalid certificate")
-	flag.StringVar(&formatStr, "format", "short", "Output format (short|long)")
+	flag.StringVar(&formatStr, "format", "short", "Output format (short|long|json)")
 	flag.DurationVar(&config.Timeout, "timeout", 10*time.Second, "Connection timeout")
 	flag.IntVar(&config.WarnDays, "warn-days", 0, "Exit with status 2 if certificate expires within this many days (0 disables)")
 	flag.Parse()
@@ -52,8 +54,10 @@ func main() {
 		config.Format = FormatShort
 	case "long":
 		config.Format = FormatLong
+	case "json":
+		config.Format = FormatJSON
 	default:
-		fmt.Fprintf(os.Stderr, "Error: invalid format '%s', must be 'short' or 'long'\n", formatStr)
+		fmt.Fprintf(os.Stderr, "Error: invalid format '%s', must be 'short', 'long' or 'json'\n", formatStr)
 		os.Exit(1)
 	}
 
@@ -110,6 +114,8 @@ func printCertificate(cert *x509.Certificate, format OutputFormat) {
 		printShort(cert)
 	case FormatLong:
 		printLong(cert)
+	case FormatJSON:
+		printJSON(cert)
 	}
 }
 
@@ -151,6 +157,67 @@ func printLong(cert *x509.Certificate) {
 
 	fmt.Println(" SANs:")
 	printSANs(cert)
+}
+
+type CertificateInfo struct {
+	CommonName     string    `json:"commonName"`
+	Subject        string    `json:"subject"`
+	Issuer         string    `json:"issuer"`
+	SerialNumber   string    `json:"serialNumber"`
+	Version        int       `json:"version"`
+	NotBefore      time.Time `json:"notBefore"`
+	NotAfter       time.Time `json:"notAfter"`
+	ValidityDays   int       `json:"validityDays"`
+	RemainingDays  int       `json:"remainingDays"`
+	Expired        bool      `json:"expired"`
+	DNSNames       []string  `json:"dnsNames,omitempty"`
+	IPAddresses    []string  `json:"ipAddresses,omitempty"`
+	EmailAddresses []string  `json:"emailAddresses,omitempty"`
+	URIs           []string  `json:"uris,omitempty"`
+}
+
+func buildCertificateInfo(cert *x509.Certificate) CertificateInfo {
+	remaining := time.Until(cert.NotAfter)
+	validityDuration := cert.NotAfter.Sub(cert.NotBefore)
+
+	ipAddresses := make([]string, len(cert.IPAddresses))
+	for i, ip := range cert.IPAddresses {
+		ipAddresses[i] = ip.String()
+	}
+
+	uris := make([]string, len(cert.URIs))
+	for i, uri := range cert.URIs {
+		uris[i] = uri.String()
+	}
+
+	return CertificateInfo{
+		CommonName:     getCommonName(cert),
+		Subject:        cert.Subject.String(),
+		Issuer:         cert.Issuer.String(),
+		SerialNumber:   cert.SerialNumber.String(),
+		Version:        cert.Version,
+		NotBefore:      cert.NotBefore,
+		NotAfter:       cert.NotAfter,
+		ValidityDays:   int(validityDuration.Hours() / 24),
+		RemainingDays:  int(remaining.Hours() / 24),
+		Expired:        remaining < 0,
+		DNSNames:       cert.DNSNames,
+		IPAddresses:    ipAddresses,
+		EmailAddresses: cert.EmailAddresses,
+		URIs:           uris,
+	}
+}
+
+func printJSON(cert *x509.Certificate) {
+	info := buildCertificateInfo(cert)
+
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to marshal certificate info: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println(string(data))
 }
 
 func getCommonName(cert *x509.Certificate) string {
