@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"time"
 )
@@ -21,6 +22,7 @@ type Config struct {
 	Port     int
 	Insecure bool
 	Format   OutputFormat
+	Timeout  time.Duration
 }
 
 func main() {
@@ -31,6 +33,7 @@ func main() {
 	flag.IntVar(&config.Port, "port", 443, "Port to check")
 	flag.BoolVar(&config.Insecure, "insecure", false, "Accept invalid certificate")
 	flag.StringVar(&formatStr, "format", "short", "Output format (short|long)")
+	flag.DurationVar(&config.Timeout, "timeout", 10*time.Second, "Connection timeout")
 	flag.Parse()
 
 	if config.Domain == "" {
@@ -52,7 +55,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cert, err := getCertificate(config.Domain, config.Port, config.Insecure)
+	cert, err := getCertificate(config.Domain, config.Port, config.Insecure, config.Timeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -61,7 +64,7 @@ func main() {
 	printCertificate(cert, config.Format)
 }
 
-func getCertificate(domain string, port int, insecure bool) (*x509.Certificate, error) {
+func getCertificate(domain string, port int, insecure bool, timeout time.Duration) (*x509.Certificate, error) {
 	address := fmt.Sprintf("%s:%d", domain, port)
 
 	tlsConfig := &tls.Config{
@@ -69,7 +72,8 @@ func getCertificate(domain string, port int, insecure bool) (*x509.Certificate, 
 		InsecureSkipVerify: insecure,
 	}
 
-	conn, err := tls.Dial("tcp", address, tlsConfig)
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := tls.DialWithDialer(dialer, "tcp", address, tlsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", address, err)
 	}
