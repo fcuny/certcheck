@@ -61,7 +61,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cert, err := getCertificate(config.Domain, config.Port, config.Insecure, config.Timeout)
+	cert, err := getCertificate(config.Domain, config.Port, config.Insecure, nil, config.Timeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -80,12 +80,16 @@ func exitCodeForExpiry(remainingDays int, warnDays int) int {
 	return 0
 }
 
-func getCertificate(domain string, port int, insecure bool, timeout time.Duration) (*x509.Certificate, error) {
+// getCertificate returns the leaf certificate presented by domain:port. It
+// verifies the chain against roots, or against the system roots when roots is
+// nil, unless insecure is set.
+func getCertificate(domain string, port int, insecure bool, roots *x509.CertPool, timeout time.Duration) (*x509.Certificate, error) {
 	address := fmt.Sprintf("%s:%d", domain, port)
 
 	tlsConfig := &tls.Config{
 		ServerName:         domain,
 		InsecureSkipVerify: insecure,
+		RootCAs:            roots,
 	}
 
 	dialer := &net.Dialer{Timeout: timeout}
