@@ -34,6 +34,12 @@ instead of `0` when the certificate's remaining validity is `N` days or
 fewer (including already expired). Status `1` is still reserved for hard
 errors such as connection or parsing failures.
 
+`-version` prints the version and the Go toolchain the binary was built
+with, for example `certcheck v0.1.0 built with go1.27.3`. A build from a
+checkout shows the commit instead, with `+dirty` if it had uncommitted
+changes. The Go version matters because certificate trust fixes ship in the
+toolchain, so an older binary may lack them until it is rebuilt.
+
 ## Notes
 
 Could the same be achieved with a wrapper around `openssl` ? yes.

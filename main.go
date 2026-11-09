@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"time"
 )
 
@@ -31,6 +33,7 @@ type Config struct {
 func main() {
 	var config Config
 	var formatStr string
+	var showVersion bool
 
 	flag.StringVar(&config.Domain, "domain", "", "Domain to check (required)")
 	flag.IntVar(&config.Port, "port", 443, "Port to check")
@@ -38,7 +41,14 @@ func main() {
 	flag.StringVar(&formatStr, "format", "short", "Output format (short|long|json)")
 	flag.DurationVar(&config.Timeout, "timeout", 10*time.Second, "Connection timeout")
 	flag.IntVar(&config.WarnDays, "warn-days", 0, "Exit with status 2 if certificate expires within this many days (0 disables)")
+	flag.BoolVar(&showVersion, "version", false, "Print the version and the Go toolchain it was built with, then exit")
 	flag.Parse()
+
+	if showVersion {
+		info, _ := debug.ReadBuildInfo() // nil when the binary has no build info
+		fmt.Println(versionString(info))
+		os.Exit(0)
+	}
 
 	if config.Domain == "" {
 		if len(flag.Args()) == 0 {
@@ -71,6 +81,48 @@ func main() {
 
 	remainingDays := int(time.Until(cert.NotAfter).Hours() / 24)
 	os.Exit(exitCodeForExpiry(remainingDays, config.WarnDays))
+}
+
+// versionString describes the build from the information the Go toolchain
+// embeds in every binary, so it needs no -ldflags. The module version is the
+// tag for `go install ...@vX.Y.Z`, or a pseudo-version with the commit (and
+// "+dirty" for uncommitted changes) for builds from a checkout. The Go version
+// matters too: it decides which crypto/x509 fixes, such as distrusted
+// intermediates, the binary has.
+func versionString(info *debug.BuildInfo) string {
+	if info == nil {
+		return fmt.Sprintf("certcheck unknown built with %s", runtime.Version())
+	}
+
+	version := info.Main.Version
+	if version == "" || version == "(devel)" {
+		version = "(devel)"
+		var revision string
+		var modified bool
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				revision = s.Value
+			case "vcs.modified":
+				modified = s.Value == "true"
+			}
+		}
+		if revision != "" {
+			if len(revision) > 12 {
+				revision = revision[:12]
+			}
+			version = revision
+			if modified {
+				version += "+dirty"
+			}
+		}
+	}
+
+	goVersion := info.GoVersion
+	if goVersion == "" {
+		goVersion = runtime.Version()
+	}
+	return fmt.Sprintf("certcheck %s built with %s", version, goVersion)
 }
 
 func exitCodeForExpiry(remainingDays int, warnDays int) int {
