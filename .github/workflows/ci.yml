@@ -24,8 +24,3 @@ jobs:
 
       - name: Test
         run: go test -v ./...
-
-      - name: Smoke test against badssl.com
-        run: |
-          go run . badssl.com
-          go run . -domain expired.badssl.com -insecure -format long

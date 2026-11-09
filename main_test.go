@@ -1,24 +1,285 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
+	"fmt"
+	"io"
 	"math/big"
 	"net"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-func TestGetCertificateTimeout(t *testing.T) {
-	start := time.Now()
-	_, err := getCertificate("10.255.255.1", 443, false, 200*time.Millisecond)
-	elapsed := time.Since(start)
+const (
+	testHost       = "127.0.0.1"
+	testOtherHost  = "127.0.0.2"
+	testCommonName = "certcheck-test"
 
-	if err == nil {
-		t.Fatal("expected an error dialing a non-routable address, got nil")
+	// runMainEnv makes the test binary behave as the certcheck CLI, so tests can
+	// observe real flag parsing, stdout and exit codes.
+	runMainEnv = "CERTCHECK_TEST_RUN_MAIN"
+)
+
+// The half-day offsets keep the whole-day counts in the CLI output stable while
+// a test runs.
+var (
+	validUntil   = time.Now().Add(30*24*time.Hour + 12*time.Hour)
+	expiredSince = time.Now().Add(-30*24*time.Hour - 12*time.Hour)
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv(runMainEnv) == "1" {
+		main()
+		return
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("getCertificate took %s, expected it to time out quickly", elapsed)
+	os.Exit(m.Run())
+}
+
+// startTLSServer serves a self-signed certificate on the loopback interface. It
+// returns the port and a pool that trusts the certificate.
+func startTLSServer(t *testing.T, notAfter time.Time, san string) (int, *x509.CertPool) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: testCommonName},
+		NotBefore:             notAfter.Add(-90 * 24 * time.Hour),
+		NotAfter:              notAfter,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:           []net.IP{net.ParseIP(san)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("creating certificate: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parsing certificate: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	listener, err := tls.Listen("tcp", net.JoinHostPort(testHost, "0"), &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+	})
+	if err != nil {
+		t.Fatalf("listening: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			wg.Go(func() {
+				defer func() { _ = conn.Close() }()
+				// Reading drives the handshake, then waits for the client to hang up.
+				_, _ = io.Copy(io.Discard, conn)
+			})
+		}
+	})
+	t.Cleanup(func() {
+		_ = listener.Close()
+		wg.Wait()
+	})
+
+	return listener.Addr().(*net.TCPAddr).Port, roots
+}
+
+func isUnknownAuthority(err error) bool {
+	var target x509.UnknownAuthorityError
+	return errors.As(err, &target)
+}
+
+func isExpired(err error) bool {
+	var target x509.CertificateInvalidError
+	return errors.As(err, &target) && target.Reason == x509.Expired
+}
+
+func isHostnameMismatch(err error) bool {
+	var target x509.HostnameError
+	return errors.As(err, &target)
+}
+
+func TestGetCertificateVerification(t *testing.T) {
+	tests := []struct {
+		name        string
+		notAfter    time.Time
+		san         string
+		trusted     bool // pass the server's certificate as roots, otherwise use system roots
+		insecure    bool
+		wantErr     func(error) bool // nil means the call must succeed
+		wantExpired bool
+	}{
+		{name: "untrusted chain fails", notAfter: validUntil, san: testHost, wantErr: isUnknownAuthority},
+		{name: "untrusted chain with insecure succeeds", notAfter: validUntil, san: testHost, insecure: true},
+		{name: "trusted chain succeeds", notAfter: validUntil, san: testHost, trusted: true},
+		{name: "expired certificate fails", notAfter: expiredSince, san: testHost, trusted: true, wantErr: isExpired},
+		{name: "expired certificate with insecure is reported as expired", notAfter: expiredSince, san: testHost, insecure: true, wantExpired: true},
+		{name: "hostname mismatch fails", notAfter: validUntil, san: testOtherHost, trusted: true, wantErr: isHostnameMismatch},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			port, serverRoots := startTLSServer(t, tt.notAfter, tt.san)
+			var roots *x509.CertPool
+			if tt.trusted {
+				roots = serverRoots
+			}
+
+			cert, err := getCertificate(testHost, port, tt.insecure, roots, 5*time.Second)
+
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatal("expected a verification error, got nil")
+				}
+				if !tt.wantErr(err) {
+					t.Fatalf("unexpected error type: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cert.Subject.CommonName != testCommonName {
+				t.Errorf("CommonName = %q, want %q", cert.Subject.CommonName, testCommonName)
+			}
+			if got := buildCertificateInfo(cert).Expired; got != tt.wantExpired {
+				t.Errorf("Expired = %v, want %v", got, tt.wantExpired)
+			}
+		})
+	}
+}
+
+// The listener never accepts or writes, so the handshake stalls until the
+// timeout fires. The timeout covers the connect and the handshake together.
+func TestGetCertificateTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", net.JoinHostPort(testHost, "0"))
+	if err != nil {
+		t.Fatalf("listening: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := getCertificate(testHost, port, false, nil, 100*time.Millisecond)
+		done <- err
+	}()
+
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("getCertificate did not honor its timeout")
+	}
+
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("expected a timeout error, got %v", err)
+	}
+}
+
+func runCLI(t *testing.T, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locating test binary: %v", err)
+	}
+	cmd := exec.Command(executable, args...)
+	cmd.Env = append(os.Environ(), runMainEnv+"=1")
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running CLI: %v", err)
+		}
+	}
+	return outBuf.String(), errBuf.String(), cmd.ProcessState.ExitCode()
+}
+
+func TestCLI(t *testing.T) {
+	validPort, _ := startTLSServer(t, validUntil, testHost)
+	expiredPort, _ := startTLSServer(t, expiredSince, testHost)
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantStdout []string
+		wantStderr string
+	}{
+		{
+			name:       "positional domain with default short format",
+			args:       []string{"-insecure", "-port", strconv.Itoa(validPort), testHost},
+			wantStdout: []string{testCommonName + ":", "(30 days left)"},
+		},
+		{
+			name:       "domain flag with short format on expired certificate",
+			args:       []string{"-domain", testHost, "-port", strconv.Itoa(expiredPort), "-insecure"},
+			wantStdout: []string{"(it expired 30 days ago)"},
+		},
+		{
+			name:       "domain flag with long format on expired certificate",
+			args:       []string{"-domain", testHost, "-port", strconv.Itoa(expiredPort), "-insecure", "-format", "long"},
+			wantStdout: []string{"remaining days: -30", "IP address:" + testHost},
+		},
+		{
+			name:       "json format on expired certificate",
+			args:       []string{"-domain", testHost, "-port", strconv.Itoa(expiredPort), "-insecure", "-format", "json"},
+			wantStdout: []string{`"expired": true`, `"commonName": "` + testCommonName + `"`},
+		},
+		{
+			name:       "untrusted certificate exits 1 without insecure",
+			args:       []string{"-port", strconv.Itoa(validPort), testHost},
+			wantExit:   1,
+			wantStderr: fmt.Sprintf("failed to connect to %s:%d", testHost, validPort),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, stderr, exitCode := runCLI(t, tt.args...)
+
+			if exitCode != tt.wantExit {
+				t.Fatalf("exit code = %d, want %d\nstdout: %s\nstderr: %s", exitCode, tt.wantExit, stdout, stderr)
+			}
+			for _, want := range tt.wantStdout {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("stdout missing %q:\n%s", want, stdout)
+				}
+			}
+			if tt.wantExit != 0 && stdout != "" {
+				t.Errorf("expected empty stdout on failure, got:\n%s", stdout)
+			}
+			if !strings.Contains(stderr, tt.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tt.wantStderr, stderr)
+			}
+		})
 	}
 }
 
