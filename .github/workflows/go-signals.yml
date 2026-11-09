@@ -1,0 +1,77 @@
+name: Go signals
+
+# Signals that a Go bump is needed or would break. These jobs depend on the
+# outside world (the vulnerability database, the latest Go release), so they
+# stay out of ci.yml and never run on pull requests.
+#
+# certcheck has no module dependencies. If any appear, add a leg that runs
+# `go get -u -t ./...` before vet and test.
+
+on:
+  schedule:
+    # The jobs below match on these strings, so change them together.
+    - cron: "23 6 * * *"
+    - cron: "47 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '23 6 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The scanner can require a newer Go than go.mod names, so build it with
+      # stable.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # setup-go exports GOTOOLCHAIN=local, which would scan the standard
+      # library of the stable release. Override it to scan what go.mod selects.
+      # Verbose output names the standard library version that was scanned.
+      - name: Scan with the go.mod toolchain
+        run: |
+          toolchain=$(go mod edit -json | jq -r '.Toolchain // "go\(.Go)"')
+          GOTOOLCHAIN="$toolchain" govulncheck -show verbose ./...
+
+  latest-go:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '47 6 * * 1'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-line: [unchanged, raised]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      # The go line sets behaviour defaults through GODEBUG, so a newer
+      # toolchain alone keeps the old defaults.
+      - name: Raise the go line to the installed version
+        if: matrix.go-line == 'raised'
+        run: |
+          version=$(go env GOVERSION)
+          go mod edit -go="${version#go}"
+          grep '^go ' go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
