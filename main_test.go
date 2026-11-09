@@ -15,6 +15,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -259,6 +261,17 @@ func TestCLI(t *testing.T) {
 			wantExit:   1,
 			wantStderr: fmt.Sprintf("failed to connect to %s:%d", testHost, validPort),
 		},
+		{
+			// -version must not require a domain or open a connection.
+			name:       "version flag prints version and exits 0",
+			args:       []string{"-version"},
+			wantStdout: []string{"certcheck ", " built with " + runtime.Version() + "\n"},
+		},
+		{
+			name:       "version flag ignores the domain",
+			args:       []string{"-version", "-port", strconv.Itoa(validPort), testHost},
+			wantStdout: []string{" built with " + runtime.Version()},
+		},
 	}
 
 	for _, tt := range tests {
@@ -278,6 +291,71 @@ func TestCLI(t *testing.T) {
 			}
 			if !strings.Contains(stderr, tt.wantStderr) {
 				t.Errorf("stderr missing %q:\n%s", tt.wantStderr, stderr)
+			}
+		})
+	}
+}
+
+func TestVersionString(t *testing.T) {
+	const rev = "ffb84d0e02c692abae48e91feb5dca65bfc94773"
+	vcs := func(revision, modified string) []debug.BuildSetting {
+		return []debug.BuildSetting{
+			{Key: "vcs", Value: "git"},
+			{Key: "vcs.revision", Value: revision},
+			{Key: "vcs.modified", Value: modified},
+		}
+	}
+
+	tests := []struct {
+		name string
+		info *debug.BuildInfo
+		want string
+	}{
+		{
+			name: "tagged install",
+			info: &debug.BuildInfo{GoVersion: "go1.27.3", Main: debug.Module{Version: "v0.1.0"}},
+			want: "certcheck v0.1.0 built with go1.27.3",
+		},
+		{
+			name: "pseudo-version from a dirty checkout keeps its own commit",
+			info: &debug.BuildInfo{
+				GoVersion: "go1.27.3",
+				Main:      debug.Module{Version: "v0.0.0-20261109171944-ffb84d0e02c6+dirty"},
+				Settings:  vcs(rev, "true"),
+			},
+			want: "certcheck v0.0.0-20261109171944-ffb84d0e02c6+dirty built with go1.27.3",
+		},
+		{
+			name: "devel build falls back to the commit",
+			info: &debug.BuildInfo{GoVersion: "go1.27.3", Main: debug.Module{Version: "(devel)"}, Settings: vcs(rev, "false")},
+			want: "certcheck ffb84d0e02c6 built with go1.27.3",
+		},
+		{
+			name: "devel build marks uncommitted changes",
+			info: &debug.BuildInfo{GoVersion: "go1.27.3", Main: debug.Module{Version: "(devel)"}, Settings: vcs(rev, "true")},
+			want: "certcheck ffb84d0e02c6+dirty built with go1.27.3",
+		},
+		{
+			name: "devel build without VCS information",
+			info: &debug.BuildInfo{GoVersion: "go1.27.3", Main: debug.Module{Version: "(devel)"}},
+			want: "certcheck (devel) built with go1.27.3",
+		},
+		{
+			name: "empty version and Go version",
+			info: &debug.BuildInfo{},
+			want: "certcheck (devel) built with " + runtime.Version(),
+		},
+		{
+			name: "no build information",
+			info: nil,
+			want: "certcheck unknown built with " + runtime.Version(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := versionString(tt.info); got != tt.want {
+				t.Errorf("versionString() = %q, want %q", got, tt.want)
 			}
 		})
 	}
